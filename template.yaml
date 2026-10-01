@@ -1,0 +1,192 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless portfolio + blog (S3, API Gateway, Lambda, DynamoDB, Cognito, CloudWatch)
+
+# All resource names start with the student ID (79010409)
+Parameters:
+  StudentId:
+    Type: String
+    Description: Your Student ID (lowercase, used in every resource name)
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{2,30}$'
+    ConstraintDescription: Lowercase letters, digits and hyphens only (3-31 chars)
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 128
+    # Learner Lab does not allow creating IAM roles, so each function uses LabRole
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref PostsTable
+
+Resources:
+  # Database
+  PostsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${StudentId}-posts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: postId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: postId
+          KeyType: HASH
+
+  # Authentication
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${StudentId}-user-pool
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${StudentId}-web-client
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # API Gateway
+  BlogApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub ${StudentId}-blog-api
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !GetAtt UserPool.Arn
+      # add CORS headers to 4xx errors too so the browser shows the real error
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+
+  # Lambda functions
+  ListPostsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${StudentId}-listPosts
+      CodeUri: backend/
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Handler: list_posts.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BlogApi
+            Path: /posts
+            Method: GET
+
+  GetPostFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${StudentId}-getPost
+      CodeUri: backend/
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Handler: get_post.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BlogApi
+            Path: /posts/{id}
+            Method: GET
+
+  CreatePostFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${StudentId}-createPost
+      CodeUri: backend/
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Handler: create_post.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BlogApi
+            Path: /posts
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuth
+
+  # CloudWatch Logs
+  # log groups with the student ID in the name, kept for 7 days
+  ListPostsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${StudentId}-listPosts
+      RetentionInDays: 7
+
+  GetPostLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${StudentId}-getPost
+      RetentionInDays: 7
+
+  CreatePostLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${StudentId}-createPost
+      RetentionInDays: 7
+
+  # Static website (S3)
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${StudentId}-site-${AWS::AccountId}
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadForWebsite
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+
+Outputs:
+  WebsiteUrl:
+    Value: !GetAtt FrontendBucket.WebsiteURL
+  BucketName:
+    Value: !Ref FrontendBucket
+  ApiUrl:
+    Value: !Sub https://${BlogApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  TableName:
+    Value: !Ref PostsTable
